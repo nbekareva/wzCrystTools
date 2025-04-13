@@ -1,0 +1,15 @@
+type
+Zn 1
+O 2
+
+auxiliary occupancy
+Zn 1.0
+O 1.0
+
+auxiliary Debye-Waller
+Zn 0.005
+O 0.005
+
+auxiliary absorption
+Zn 0.0254
+O 0.0078

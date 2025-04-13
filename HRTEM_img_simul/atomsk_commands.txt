@@ -1,0 +1,25 @@
+atomsk --create wz 3.23735102 5.22206130 Zn O cif_ucell.lmp
+atomsk cif_ucell.lmp -duplicate 20 20 20 -orthogonal-cell box.lmp
+atomsk box.lmp -prop elastic.txt -disloc 0.501*box 0.501*box edge y z 6.144132635909867 0.35655 pyIV_a+c_edge.lmp
+atomsk ZnO_dislocation.0.lmp -unit A nm JEMS
+
+atomsk pyIV_a+c_edge1/ZnO_dislocation.None.lmp  -prop jems_data.txt -unit A nm JEMS
+
+
+# 1. n = z because z tilted for pyramidal planes !
+#    then rotate to align zeta = z for JEMS 
+
+
+# 2.
+### jems_data.txt ###
+#auxiliary occupancy
+#Zn 1.0
+#O 1.0
+#
+#auxiliary Debye-Waller
+#Zn 0.005
+#O 0.005
+#
+#auxiliary absorption
+#Zn 0.0254
+#O 0.0078
