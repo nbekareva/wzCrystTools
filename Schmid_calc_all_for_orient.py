@@ -5,7 +5,7 @@ import re
 import os
 import glob
 import numpy as np
-from hexag_cristallo_tool import *
+from hexag_cristallo_tool_beta import Wurtzite
 
 def get_gsf_barrier(plane_type, dir_type, gsf_base_dir):
     """
@@ -140,16 +140,16 @@ file.write('orient\tplane_conv_name\ti\tb_conv_name\tj\t' +
            'plane\tb\tphi(orient_vs_plane)\tlambda(orient_vs_b)\tSchmid' + 
            '\tb_norm\tGSF_barrier\tGSF_shift\tabs(Schmid)\tm/b2\tm/(b2*GSF)\n')
 
-for plane_conv_name, generic_plane in crystal.generic_slip_modes.items():
-    for i, plane in enumerate(crystal.list_equiv(generic_plane)):   # for every equiv plane
-        n = crystal.n_to_hkil(plane)
-        cos_phi, phi = crystal.angle_bw_planes(orient, plane)       # Schmid for plane
+for plane_conv_name, generic_plane in crystal.generic_planes.items():
+    for i, plane in enumerate(crystal.equivalent_directions(generic_plane)):   # for every equiv plane
+        n = crystal.plane_normal(plane)
+        cos_phi, phi = crystal.angle_between_directions(orient, n)       # Schmid for plane
 
         if cos_phi != 0:
-            for b_conv_name, generic_b in crystal.generic_perfect_Burgers.items():
-                for j, b in enumerate(crystal.list_equiv(generic_b)):   # for every equiv Burgers
-                    b_in_plane, _ = crystal.angle_bw_directions(n, b)    # Burgers in plane
-                    cos_lambda, lambdaa = crystal.angle_bw_directions(orient, b)    # Schmid for Burgers
+            for b_conv_name, generic_b in crystal.generic_directions.items():
+                for j, b in enumerate(crystal.equivalent_directions(generic_b)):   # for every equiv Burgers
+                    b_in_plane, _ = crystal.angle_between_directions(n, b)    # Burgers in plane
+                    cos_lambda, lambdaa = crystal.angle_between_directions(orient, b)    # Schmid for Burgers
                     
                     if b_in_plane == 0 and cos_lambda != 0:
                         plane_str = " ".join(str(idx) for idx in plane)

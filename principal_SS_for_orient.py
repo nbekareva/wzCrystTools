@@ -69,8 +69,8 @@ def analyze_schmid_factors(file_path, observ_dir):
 
 # Usage
 if __name__ == "__main__":
-    orient = '1 1 -2 0'
-    B0 = '0 0 0 1'          # zero_ZoneAxis, observ dir
+    orient = '0 0 0 1'
+    B0 = '1 -2 1 0'          # zero_ZoneAxis, observ dir
     
     file_path = f"Schmid_factors_{orient}.csv"
     result = analyze_schmid_factors(file_path, observ_dir=B0)
