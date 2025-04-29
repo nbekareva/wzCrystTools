@@ -3,3 +3,4 @@ __pycache__
 /HRTEM_*/*/*.lmp
 /HRTEM_*/*/*.txt
 /copy_GSF_data*
+*nohup.out
