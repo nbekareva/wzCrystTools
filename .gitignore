@@ -4,3 +4,4 @@ __pycache__
 /HRTEM_*/*/*.txt
 /copy_GSF_data*
 *nohup.out
+*venv*

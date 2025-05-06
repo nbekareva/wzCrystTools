@@ -92,7 +92,7 @@ if not data[xcol]:
     sys.exit(1)
 
 # Create the plot
-plt.figure(figsize=(12, 7))
+plt.figure(figsize=(6, 4))
 
 # Plot each y column against x
 for i, ycol in enumerate(ycols):
@@ -106,11 +106,12 @@ for i, ycol in enumerate(ycols):
     # Filter out NaN values
     valid_indices = ~np.isnan(data[ycol])
     x_valid = [data[xcol][j] for j in range(len(data[xcol])) if valid_indices[j]]
-    y_valid = [data[ycol][j] for j in range(len(data[ycol])) if valid_indices[j]]
+    y_valid = [data[ycol][j] for j in range(len(data[ycol])) if valid_indices[j]]       # * 1.602176565e-9 / 10e-20 / 10e6  # Convert force/surf (eV/Angstrom^3 --> Pa --> MPa)
     
     if len(x_valid) > 0:
         plt.plot(x_valid, y_valid, 
                  marker=markers[marker_idx], 
+                 markersize=1,
                  color=colors[color_idx], 
                  linestyle='-', 
                  label=y_label)
