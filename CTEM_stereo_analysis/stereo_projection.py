@@ -1,3 +1,4 @@
+#!/usr/bin/env python
 import itertools
 from math import isclose
 import re
@@ -188,7 +189,7 @@ class WzStereogram:
 
         return poles_in_zone
 
-    def index_DP_spots(self, angle_bw_spots, plane_poles_in_zone, drop_weak_spots=True, min_intensity=7):
+    def list_possible_DP_spots(self, angle_bw_spots, plane_poles_in_zone, drop_weak_spots=True, min_intensity=7):
         plane_pole_combos = combinations_from_two_lists(plane_poles_in_zone, plane_poles_in_zone)
         all_angles = set()
 
@@ -199,7 +200,7 @@ class WzStereogram:
             cos, angle_bw_planes = proj.crystal.angle_between_directions(n1, n2)
             all_angles.add(angle_bw_planes)
 
-            if isclose(angle_bw_planes, angle_bw_spots, abs_tol=0.5):
+            if isclose(angle_bw_planes, angle_bw_spots, abs_tol=0.7):
                 combo = tuple(combo)
                 pole1_str = " ".join(map(str, combo[0]))
                 pole2_str = " ".join(map(str, combo[1]))
@@ -229,10 +230,10 @@ if __name__ == "__main__":
     dhkl_list_file = "dhkl_list.txt"
     approx_zone_axis = '7 -5 -2 -3'       # impossible to index
     # approx_zone_axis = '8 -10 2 -3'
-    # approx_zone_axis = '1 0 -1 2'
-    abs_tol_in_zone = 7
+    # approx_zone_axis = '4 -5 1 -3'
+    abs_tol_in_zone = 10
     weak_none, min_intensity = False, 7
-    some_DP_angle = 72.6
+    some_DP_angle = 72.5
 
     proj = WzStereogram(a=3.2494, c=5.2054, dhkl_list_file=dhkl_list_file)
     print(f"Loaded dhkl list from {dhkl_list_file}")
@@ -248,7 +249,7 @@ if __name__ == "__main__":
     
     print("Identified poles:")
     print(f"Pole 1\t\tPole 2\t\tAngle\tdhkl1\tint1\tdhkl2\tint2")
-    proj.index_DP_spots(some_DP_angle, plane_poles_in_zone=plane_poles_in_zone, drop_weak_spots=weak_none, min_intensity=min_intensity)
+    proj.list_possible_DP_spots(some_DP_angle, plane_poles_in_zone=plane_poles_in_zone, drop_weak_spots=weak_none, min_intensity=min_intensity)
     
     print(proj.b_by_extictions('1 0 -1 0', '1 0 -1 1', '1 0 -1 2', '2 -1 -1 -2', abs_tol=5))
 
