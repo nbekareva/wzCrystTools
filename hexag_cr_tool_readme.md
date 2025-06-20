@@ -7,3 +7,6 @@ Known bugs:
     c.equivalent_directions('-1 -1 2 -2', drop_inverse=False)
     [[-1, 2, -1, -2], [-1, 2, -1, 2], [-1, -1, 2, -2], [-1, -1, 2, 2], [2, -1, -1, -2], [2, -1, -1, 2]]
     ```
+    **Fri Jun 20 14:35:48 CEST 2025**
+    **--> FIXED**
+2. Cartesian-lattice indices conversion functions: work in progress.
