@@ -79,6 +79,33 @@ class Wurtzite:
             [0, 0, 0, (9*self.a**2)/(2*self.c**2)]
         ])
 
+    # PROPER FORMULATION HERE - G, g TO REDO LATER ?
+    # def __init__(self, lattice_vectors: np.ndarray):
+    #     """
+    #     Initialize the converter with lattice vectors.
+        
+    #     Args:
+    #         lattice_vectors: 3x3 matrix where columns are lattice vectors [a, b, c]
+    #                        Format: [[a1, b1, c1],
+    #                                [a2, b2, c2], 
+    #                                [a3, b3, c3]]
+    #     """
+    #     self.M = np.array(lattice_vectors)
+    #     if self.M.shape != (3, 3):
+    #         raise ValueError("Lattice vectors must be a 3x3 matrix")
+        
+    #     # Calculate metric tensor G = M^T @ M
+    #     self.G = self.M.T @ self.M
+        
+    #     # Calculate inverse metric tensor
+    #     try:
+    #         self.G_inv = np.linalg.inv(self.G)
+    #     except np.linalg.LinAlgError:
+    #         raise ValueError("Metric tensor is singular - lattice vectors are linearly dependent")
+        
+    #     # Pre-calculate transformation matrix for efficiency
+    #     self.transform_matrix = self.G_inv @ self.M.T
+        
     def _init_elastic_constants(self) -> None:
         """Initialize elastic constants for ZnO (in GPa)."""
         # Elastic stiffness tensor [ref 86 from Ozgur Gen props of ZnO]
@@ -190,7 +217,14 @@ class Wurtzite:
         """
         indices = self._to_list(deepcopy(uvtw))
         u, v, _, w = indices
-        return np.array([2*u+v, 2*v+u, w])
+        u1 = 2*u+v
+        v1 = 2*v+u
+
+        if all(i % 3 == 0 for i in [u1, v1, w]):
+        # if self.needs_triple_correction([u1, v1, -(u1+v1), w]):
+            return np.array([u1, v1, w]) / 3
+
+        return np.array([u1, v1, w])
     
     def vector_3ind_to_4ind(self, uvw: Union[str, List]) -> np.ndarray:
         """
@@ -207,6 +241,10 @@ class Wurtzite:
         u1 = (2*u-v)/3
         v1 = (2*v-u)/3
         t = -(u1+v1)
+
+        if all(abs(i) // 1 == 0 for i in [u1, v1, t]):      # *3 if non-int indices
+            return np.array([u1, v1, t, w]) * 3
+
         return np.array([u1, v1, t, w])
     
     # ==================== VECTOR OPERATIONS ====================
@@ -469,7 +507,8 @@ class Wurtzite:
             return [indices]
         
         # Generate permutations of the first three indices
-        uvt_permutations = set(permutations(indices[:-1]))
+        # print(list(permutations([-i for i in indices[:-1]])))
+        uvt_permutations = set(chain(permutations(indices[:-1]), permutations([-i for i in indices[:-1]])))
         
         # Remove inverse duplicates
         if drop_inverse:
@@ -561,16 +600,13 @@ class Wurtzite:
     
     def vector_to_cartesian(self, uvtw: Union[str, List]) -> np.ndarray:
         """
-        Convert a direction vector from Miller-Bravais indices to Cartesian coordinates.
-        
-        Args:
-            uvtw: Miller-Bravais indices of the direction [u,v,t,w]
-            
-        Returns:
-            Normalized Cartesian coordinates [x,y,z] of the direction
+        Convert Cartesian coordinates to fractional coordinates using metric tensor.
         """
-        indices = self._to_list(uvtw)
+        indices = self._to_np_array(self._to_list(uvtw))
         
+        # Apply transformation: f = G^(-1) @ M^T @ r
+        fractional = (self.transform_matrix @ indices.T).T
+
         # Convert to Miller indices (3-index system)
         uvw = self.vector_4ind_to_3ind(indices)
         
@@ -595,6 +631,35 @@ class Wurtzite:
             cartesian = cartesian / norm
             
         return cartesian
+    
+    def cartesian_to_vector(self, cartesian: Union[str, List]) -> np.ndarray:
+        """
+        Convert Cartesian coordinates to a direction vector in Miller-Bravais notation.
+        
+        Args:
+            cartesian: Cartesian coordinates [x,y,z]
+            
+        Returns:
+            Direction vector in 4-index notation [u,v,t,w]
+        """
+        coords = self._to_np_array(self._to_list(cartesian))
+        
+        # Extract components
+        x, y, z = coords
+        
+        # Calculate Miller indices (3-index system)
+        u = (2 * x) / (self.a * np.sqrt(3))
+        v = (2 * y - x) / self.a
+        w = z / self.c
+        
+        # Convert to 4-index notation
+        uvw = np.array([u, v, 0, w])
+        
+        # Apply normalization if physical correction is needed
+        if self.needs_triple_correction(uvw):
+            uvw = uvw * 3
+            
+        return self.vector_3ind_to_4ind(uvw)
     
     # ==================== ELASTIC PROPERTIES ====================
     
