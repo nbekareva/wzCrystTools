@@ -113,11 +113,14 @@ class Wurtzite:
         self.generic_directions = {
             'a': '2 -1 -1 0',
             'b': '1 0 -1 0',
+            'p_{part}': '1 0 -1 0',        # WARNING: partial dislos, physical_norm() doesn't work
             'c': '0 0 0 1',
             'b+c': '1 0 -1 1',
-            'b/2+c': '1 0 -1 2',
-            'a/3+c': '2 -1 -1 1',
+            '\\frac{b+c}{2}_{part}': '1 0 -1 1',
+            '\\frac{b}{2}+c': '1 0 -1 2',
+            '\\frac{a}{3}+c': '2 -1 -1 1',
             'a+c': '2 -1 -1 3',
+            'a+c_{part}': '2 -1 -1 3',
             '3 0 -3 2': '3 0 -3 2',
             '5 -1 -4 3': '5 -1 -4 3'
         }
@@ -203,8 +206,9 @@ class Wurtzite:
         u1 = 2*u+v
         v1 = 2*v+u
 
-        if all(i % 3 == 0 for i in [u1, v1, w]):
-        # if self.needs_triple_correction([u1, v1, -(u1+v1), w]):
+        basal_divisible = all(i % 3 == 0 for i in [u1, v1, w])
+
+        if basal_divisible:         # see needs_triple_correction
             return np.array([u1, v1, w]) / 3
 
         return np.array([u1, v1, w])
@@ -326,9 +330,9 @@ class Wurtzite:
         Returns:
             Physical vector magnitude
         """
-        indices = self._to_list(vec)
-        standard_norm = self.norm(indices)
-        return standard_norm / 3 if self.needs_triple_correction(indices) else standard_norm
+        vec3ind = self.vector_4ind_to_3ind(vec)         # accounts for 1/3 correction
+        mag2 = np.dot(vec3ind, np.dot(self.G, vec3ind))
+        return m.sqrt(mag2)
     
     def normalized_cross_product(self, vec1: Union[str, List], vec2: Union[str, List]) -> np.ndarray:
         """
@@ -486,7 +490,7 @@ class Wurtzite:
         indices = self._to_list(vec)
         
         # Special case for [0001]
-        if indices == [0, 0, 0, 1]:
+        if indices == [0, 0, 0, 1] and drop_inverse:
             return [indices]
         
         # Generate permutations of the first three indices
@@ -523,7 +527,7 @@ class Wurtzite:
         slip_systems = {}
         
         # For each slip plane type
-        for slip_mode in self.generic_slip_modes.values():
+        for slip_mode in self.generic_planes.values():
             # Get all equivalent planes
             for plane in self.equivalent_directions(slip_mode):
                 plane_str = ' '.join(str(i) for i in plane)
@@ -533,7 +537,7 @@ class Wurtzite:
                 normal = self.plane_normal(plane)
                 
                 # For each Burgers vector type
-                for burgers_vector in self.generic_perfect_Burgers.values():
+                for burgers_vector in self.generic_directions.values():
                     # Get all equivalent Burgers vectors
                     for b_vec in self.equivalent_directions(burgers_vector):
                         # Check if Burgers vector is in the slip plane

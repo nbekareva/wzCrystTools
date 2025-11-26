@@ -1,258 +1,304 @@
-#!/usr/bin/env python
-import itertools
-from math import isclose
-import re
-import sys
-sys.path.append("/home/nbekareva/TOOLS/utils")
-from typing import List, Union, Tuple, Dict, Set, Optional, Literal
 import numpy as np
-from hexag_cristallo_tool_beta import Wurtzite
+from scipy.optimize import fsolve
+import warnings
+warnings.filterwarnings('ignore')
+
+import sys
+sys.path.append("..")
 
 
-def combinations_from_two_lists(list1, list2):
+def metric_inner_product(v1, v2, metric):
+    """Compute inner product using metric tensor: v1^T * metric * v2"""
+    return np.dot(v1, np.dot(metric, v2))
+
+def metric_norm(v, metric):
+    """Compute norm using metric tensor: sqrt(v^T * metric * v)"""
+    return np.sqrt(metric_inner_product(v, v, metric))
+
+def angle_between_vectors(v1, v2, metric):
+    """Compute angle between vectors using metric tensor"""
+    dot_product = metric_inner_product(v1, v2, metric)
+    norm1 = metric_norm(v1, metric)
+    norm2 = metric_norm(v2, metric)
+    cos_angle = dot_product / (norm1 * norm2)
+    # Clamp to avoid numerical errors
+    cos_angle = np.clip(cos_angle, -1.0, 1.0)
+    return np.arccos(cos_angle)
+
+def find_vector_from_angles_v3_reference(v1, v2, v3, theta1, theta2, metric, normalize=True):
     """
-    Generate all possible combinations of 2 elements, one from each list,
-    where order in the pair doesn't matter.
+    Find vector u such that:
+    - u forms angle theta1 with v3 in plane (v1, v3) 
+    - u forms angle theta2 with v3 in plane (v2, v3)
     
-    Args:
-        list1: First list of elements
-        list2: Second list of elements
-        
+    Parameters:
+    - v1, v2, v3: basis vectors (1D numpy arrays)
+    - theta1: angle between u and v3 in plane (v1, v3) [radians]
+    - theta2: angle between u and v3 in plane (v2, v3) [radians]
+    - metric: metric tensor (2D numpy array)
+    - normalize: whether to normalize the result vector
+    
     Returns:
-        A list of unique combinations (as frozensets)
+    - u: the unknown vector
+    - coefficients: [alpha1, alpha2, alpha3] coefficients
     """
-    all_pairs = itertools.product(list1, list2)
-    # Only keep pairs where the elements are different
-    unique_combinations = set()
-    for a, b in all_pairs:
-        if a != b:  # Only include pairs with different elements
-            # Sort to ignore order (a,b) == (b,a)
-            pair = frozenset((a, b))
-            unique_combinations.add(pair)
     
-    return unique_combinations
-
-
-    # def dirs_from_2families(self, pole_family1, pole_family2):          # old code, TO EDIT
-    #     list_a = self.crystal.equivalent_directions(pole_family1)
-    #     list_b = self.crystal.equivalent_directions(pole_family2)
-    #     list_a = [tuple(a) for a in list_a]
-    #     list_b = [tuple(b) for b in list_b]
-
-    #     combinations = combinations_from_two_lists(list_a, list_b)
-    #     angles = set()
-
-    #     for combo in combinations:
-    #         if not all(self.in_zone(c, approx_zone_axis, pole) for pole in combo):
-    #             continue
-
-    #         (n1, n2) = (self.crystal.plane_normal(list(dir)) for dir in combo)
-    #         cos, angle_bw_planes = self.crystal.angle_between_directions(n1, n2)
-    #         angles.add(angle_bw_planes)
-
-    #         if isclose(angle_bw_planes, 72.6, abs_tol=0.5):
-    #             print(f"{tuple(combo)}\t{(n1*3, n2*3)}\t{cos:.2f}\t{angle_bw_planes:.2f}")
-
-    #     # print(f"Total number of combinations: {len(combinations)}")
-    #     # print(f"Unique angles: {angles}")
-    
-class WzStereogram:
-    """
-    Requires Wurtzite from hexag_cristallo_tool_beta, where hkil, uvtw are lists.
-    Here they become tuples, mutability is no more allowed for stereogram calculations.
-    """
-    def __init__(self, a=3.2494, c=5.2054, dhkl_list_file=None):
-        self.crystal = Wurtzite(a, c)
-        self.dhkl_list = self._load_dhkl_list(dhkl_list_file) if dhkl_list_file else None
-        self.dhkl_min = 0.8
+    def equations(coeffs):
+        alpha1, alpha2, alpha3 = coeffs
+        u = alpha1 * v1 + alpha2 * v2 + alpha3 * v3
         
-        for pole_type in ["planes", "directions"]:
-            setattr(self, f"generic_{pole_type}_poles", self._init_generic_poles(pole_type=pole_type))
-            setattr(self, f"all_{pole_type}_poles", self._init_all_poles(pole_type=pole_type))
-
-    def _init_generic_poles(self, pole_type: Literal["planes", "directions"], dhkl_min=0.8):
-        generic_poles = set()
-        source_dict = getattr(self.crystal, f"generic_{pole_type}")
+        # Project u onto plane (v1, v3)
+        u_13 = alpha1 * v1 + alpha3 * v3
         
-        for pole_str in source_dict.values():
-            generic_poles.add(pole_str)
-
-        for i in range(1, 6):
-            generic_poles.add(f'2 -1 -1 {i}')
-            # if dhkl_min < 0.9:
-                # generic_poles.add(f'4 -2 -2 {i}')
-            generic_poles.add(f'1 0 -1 {i}')
-            if i < 4:
-                generic_poles.add(f'1 2 -3 {i}')
-        generic_poles.add(f'2 0 -2 1')
-        generic_poles.add(f'2 0 -2 3')
-        generic_poles.add(f'2 0 -2 5')
-        generic_poles.add(f'3 0 -3 1')
-
-        return generic_poles
-    
-    def _init_all_poles(self, pole_type: Literal["planes", "directions"], pole_set=None, dhkl_min=0.8):
-        unique_poles = set()
-
-        if pole_set is None:
-            pole_set = getattr(self, f"generic_{pole_type}_poles")
-
-        for pole_family in pole_set:
-            equiv_poles = self.crystal.equivalent_directions(pole_family, drop_inverse=False)
-
-            for equiv_pole in equiv_poles:
-                pole_tuple = tuple(equiv_pole)      # Convert to tuple for hashability in the set
-                unique_poles.add(pole_tuple)
-    
-        return unique_poles
-
-    def _load_dhkl_list(self, filename: str) -> Dict[str, List[Union[float, float]]]:
-        """
-        Read dhkl list from a file.
-        Returns: dictionary as follows: 
-            "h k i l": [dhkl, Intensity]
-            where "h k i l" is a string and [dhkl, Intensity] is a list of floats.
-        """
-        data = {}
-        with open(filename, 'r') as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith('#'):
-                    continue
-                parts = line.split()
-                if len(parts) < 4:
-                    continue
-                hkil = re.sub(r"[()']", "", " ".join(parts[:4]))
-                dhkl = float(parts[5]) if len(parts) > 4 else None
-                intensity = float(parts[9]) if len(parts) > 5 else None
-                data[hkil] = [dhkl, intensity]
-        return data
-    
-    def get_dhkl_int(self, plane_pole: str) -> Optional[Tuple[float, float]]:
-        """
-        Get dhkl and intensity values for a given pole from the dhkl list.
-        Args:
-            pole: The pole for which to get the dhkl and intensity values.
-        Returns:
-            The dhkl values if found, otherwise None.
-        """
-        if self.dhkl_list is None:
-            raise ValueError("dhkl_list is not initialized. Please provide a valid dhkl_list_file during initialization.")
+        # Project u onto plane (v2, v3)  
+        u_23 = alpha2 * v2 + alpha3 * v3
         
-        for equiv_pole_list in self.crystal.equivalent_directions(plane_pole, drop_inverse=False):  # Get equivalent poles (format is list)
-            equiv_pole = " ".join(map(str, equiv_pole_list))        # Convert back to string
-            if equiv_pole in self.dhkl_list.keys():
-                dhkl, intensity = self.dhkl_list[equiv_pole][0], self.dhkl_list[equiv_pole][1]
-                return dhkl, intensity
-        return None, None
-    
-    def is_spot_off(self, plane_pole: str, min_intensity=7) -> bool:
-        """
-        Check if a spot is off by checking its intensity value from dhkl list provided.
-        Tolerance (minimal spot intensity) is set to 7 by default.
-
-        Raises:
-            ValueError: If `self.dhkl_list` is not initialized.
-        """
-        _, intensity = self.get_dhkl_int(plane_pole)
-        if intensity is not None and intensity > min_intensity:
-            return False
-        return True
-
-    def in_zone(self, B, pole, pole_type: Literal["planes", "directions"], abs_tol=5):
-
-        if pole_type == "planes":
-            vector = self.crystal.plane_normal(pole)
+        # Constraint 1: angle between u and v3 in plane (v1, v3)
+        if metric_norm(u_13, metric) < 1e-12:
+            eq1 = float('inf')  # Degenerate case
         else:
-            vector = pole
-
-        _, angle = self.crystal.angle_between_directions(B, vector)
-
-        if isclose(angle, 90, abs_tol=abs_tol):
-            return True
+            cos_theta1_actual = metric_inner_product(u_13, v3, metric) / (
+                metric_norm(u_13, metric) * metric_norm(v3, metric))
+            cos_theta1_actual = np.clip(cos_theta1_actual, -1.0, 1.0)
+            eq1 = cos_theta1_actual - np.cos(theta1)
         
-        return False
+        # Constraint 2: angle between u and v3 in plane (v2, v3)
+        if metric_norm(u_23, metric) < 1e-12:
+            eq2 = float('inf')  # Degenerate case
+        else:
+            cos_theta2_actual = metric_inner_product(u_23, v3, metric) / (
+                metric_norm(u_23, metric) * metric_norm(v3, metric))
+            cos_theta2_actual = np.clip(cos_theta2_actual, -1.0, 1.0)
+            eq2 = cos_theta2_actual - np.cos(theta2)
+        
+        # Constraint 3: normalization (if requested)
+        if normalize:
+            eq3 = metric_norm(u, metric) - 1.0
+        else:
+            eq3 = alpha1 - 1.0  # Arbitrary constraint to fix scale
+            
+        return [eq1, eq2, eq3]
+    
+    # Try multiple initial guesses to find solutions
+    initial_guesses = [
+        [1.0, 1.0, 1.0],
+        [0.1, 0.1, 1.0],
+        [1.0, 0.1, 0.1],
+        [0.1, 1.0, 0.1],
+        [-1.0, 1.0, 1.0],
+        [1.0, -1.0, 1.0],
+    ]
+    
+    best_solution = None
+    best_residual = float('inf')
+    
+    for guess in initial_guesses:
+        try:
+            solution = fsolve(equations, guess, xtol=1e-12)
+            residual = equations(solution)
+            max_residual = max(abs(r) for r in residual if not np.isinf(r))
+            
+            if max_residual < best_residual:
+                best_residual = max_residual
+                best_solution = solution
+                
+        except Exception:
+            continue
+    
+    if best_solution is not None and best_residual < 1e-8:
+        alpha1, alpha2, alpha3 = best_solution
+        u = alpha1 * v1 + alpha2 * v2 + alpha3 * v3
+        return u, [alpha1, alpha2, alpha3]
+    else:
+        print(f"Warning: Could not find accurate solution. Best residual: {best_residual:.2e}")
+        if best_solution is not None:
+            alpha1, alpha2, alpha3 = best_solution
+            u = alpha1 * v1 + alpha2 * v2 + alpha3 * v3
+            return u, [alpha1, alpha2, alpha3]
+        return None, None
 
-    def find_poles_in_zone(self, zone_axis, pole_type: Literal["planes", "directions"], abs_tol=5):
-        """
-        Find all poles of a given type that are in the zone defined by the zone axis.
-        Args:
-            zone_axis: The zone axis to check against.
-            pole_type: The type of poles to find ("planes" or "directions").
-            abs_tol: Absolute tolerance for angle to determine if the pole is in zone.
-        Returns:
-            A list of poles of the specified type that are in the zone defined by the zone axis.
-        """
-        all_poles = getattr(self, f"all_{pole_type}_poles")
-        in_zone_mask = (self.in_zone(B=zone_axis, pole=pole, pole_type=pole_type, abs_tol=abs_tol) for pole in all_poles)
-        poles_in_zone = list(itertools.compress(all_poles, in_zone_mask))
+def verify_solution(u, v1, v2, v3, theta1, theta2, metric, coeffs):
+    """Verify that the solution satisfies the angle constraints"""
+    print("Verification:")
+    print(f"Vector u = {u}")
+    print(f"Coefficients [α₁, α₂, α₃] = {coeffs}")
+    print(f"Norm of u = {metric_norm(u, metric):.6f}")
+    
+    # Check angle between u and v3 in plane (v1, v3)
+    alpha1, alpha2, alpha3 = coeffs
+    u_13 = alpha1 * v1 + alpha3 * v3
+    actual_theta1 = angle_between_vectors(u_13, v3, metric)
+    print(f"Angle between u and v3 in plane (v1, v3): target = {theta1:.4f} rad ({np.degrees(theta1):.1f}°), actual = {actual_theta1:.4f} rad ({np.degrees(actual_theta1):.1f}°)")
+    
+    # Check angle between u and v3 in plane (v2, v3)
+    u_23 = alpha2 * v2 + alpha3 * v3
+    actual_theta2 = angle_between_vectors(u_23, v3, metric)
+    print(f"Angle between u and v3 in plane (v2, v3): target = {theta2:.4f} rad ({np.degrees(theta2):.1f}°), actual = {actual_theta2:.4f} rad ({np.degrees(actual_theta2):.1f}°)")
+    
+    # Additional verification: check that u actually lies in the specified planes for the angle measurements
+    print(f"Component of u in v2 direction (should be zero for plane (v1,v3)): α₂ = {coeffs[1]:.6f}")
+    print(f"Component of u in v1 direction (should be zero for plane (v2,v3)): α₁ = {coeffs[0]:.6f}")
 
-        return poles_in_zone
+def cross_product_metric(a, b, metric, normalize=True):
+    """
+    Compute generalized cross product for 3D vectors using metric tensor.
+    
+    Returns vector n orthogonal to both a and b in the metric space.
+    Uses formula: n^k = ε^{ijk} * a_i * b_j / sqrt(|g|)
+    
+    Parameters:
+    - a, b: 3D vectors (numpy arrays)
+    - metric: 3x3 metric tensor (numpy array) 
+    - normalize: if True, return unit vector
+    
+    Returns:
+    - n: orthogonal vector
+    """
+    # Validate inputs
+    if len(a) != 3 or len(b) != 3 or metric.shape != (3, 3):
+        raise ValueError("Requires 3D vectors and 3x3 metric tensor")
+    
+    # Lower indices: a_i = g_ij * a^j
+    a_lower = metric @ a
+    b_lower = metric @ b
+    
+    # Compute metric determinant
+    det_g = np.linalg.det(metric)
+    if det_g <= 0:
+        raise ValueError("Metric must be positive definite")
+    
+    # Generalized cross product: n^k = ε^{ijk} * a_i * b_j / sqrt(|g|)
+    sqrt_det_g = np.sqrt(det_g)
+    n = np.array([
+        (a_lower[1] * b_lower[2] - a_lower[2] * b_lower[1]) / sqrt_det_g,
+        (a_lower[2] * b_lower[0] - a_lower[0] * b_lower[2]) / sqrt_det_g,
+        (a_lower[0] * b_lower[1] - a_lower[1] * b_lower[0]) / sqrt_det_g
+    ])
+    
+    # Normalize if requested
+    if normalize:
+        norm_n = np.sqrt(n @ metric @ n)
+        if norm_n > 1e-12:
+            n = n / norm_n
+    
+    return n
 
-    def list_possible_DP_spots(self, angle_bw_spots, plane_poles_in_zone, drop_weak_spots=True, min_intensity=7):
-        plane_pole_combos = combinations_from_two_lists(plane_poles_in_zone, plane_poles_in_zone)
-        all_angles = set()
+def vector_equivalent(v):
+    uu = np.round(v, 4)
+    return [i/np.min(np.abs(uu[np.nonzero(uu)])) for i in uu]
 
-        for combo in plane_pole_combos:
-            if drop_weak_spots and any(self.is_spot_off(pole, min_intensity=min_intensity) for pole in combo):
-                continue
-            (n1, n2) = (self.crystal.plane_normal(list(pole)) for pole in combo)
-            cos, angle_bw_planes = proj.crystal.angle_between_directions(n1, n2)
-            all_angles.add(angle_bw_planes)
 
-            if isclose(angle_bw_planes, angle_bw_spots, abs_tol=0.7):
-                combo = tuple(combo)
-                pole1_str = " ".join(map(str, combo[0]))
-                pole2_str = " ".join(map(str, combo[1]))
-                dhkl1, int1 = self.get_dhkl_int(pole1_str)
-                dhkl2, int2 = self.get_dhkl_int(pole2_str)
-                print(f"{pole1_str}\t{pole2_str}\t{angle_bw_planes:.2f}\t{dhkl1}\t{int1}\t{dhkl2}\t{int2}")
-
-    def b_by_extictions(self, *kwargs, abs_tol=5):
-        common_dirs = None
-
-        for g_ext in kwargs:
-            n_g_ext = self.crystal.plane_normal(g_ext)
-            dirs_in_zone = self.find_poles_in_zone(zone_axis=n_g_ext, pole_type="directions", abs_tol=abs_tol)
-
-            dirs_set = set(map(tuple, dirs_in_zone))  # Convert inner lists/arrays to tuples
-
-            if common_dirs is None:
-                common_dirs = dirs_set
-            else:
-                common_dirs &= dirs_set  # Intersect with previous set
-
-        return list(common_dirs) if common_dirs is not None else []
-
+# Example usage
 if __name__ == "__main__":
+    # Example 1: Euclidean space (identity metric)
+    # print("Example 1: Euclidean 3D space")
+    # print("=" * 50)
     
-    # DATA TO INPUT:
-    dhkl_list_file = "dhkl_list.txt"
-    approx_zone_axis = '7 -5 -2 -3'       # impossible to index
-    # approx_zone_axis = '8 -10 2 -3'
-    # approx_zone_axis = '4 -5 1 -3'
-    abs_tol_in_zone = 10
-    weak_none, min_intensity = False, 7
-    some_DP_angle = 72.5
-
-    proj = WzStereogram(a=3.2494, c=5.2054, dhkl_list_file=dhkl_list_file)
-    print(f"Loaded dhkl list from {dhkl_list_file}")
-    print(f"Approximate zone axis: {approx_zone_axis}")
-    print(f"Approximate angle between searched diffraction spots: {some_DP_angle} degrees\n")
-
-    for pole_type in ["planes", "directions"]:
-        in_zone = proj.find_poles_in_zone(approx_zone_axis, pole_type=pole_type, abs_tol=abs_tol_in_zone) 
-        print(f" *** {pole_type} in zone with B=[{approx_zone_axis}]:\n {in_zone}\n")
-
-        if pole_type == "planes":
-            plane_poles_in_zone = in_zone
+    # # Define metric tensor (identity for Euclidean space)
+    # metric = np.eye(3)
     
-    print("Identified poles:")
-    print(f"Pole 1\t\tPole 2\t\tAngle\tdhkl1\tint1\tdhkl2\tint2")
-    proj.list_possible_DP_spots(some_DP_angle, plane_poles_in_zone=plane_poles_in_zone, drop_weak_spots=weak_none, min_intensity=min_intensity)
+    # # Define basis vectors
+    # v1 = np.array([1.0, 0.0, 0.0])  # x-axis
+    # v2 = np.array([0.0, 1.0, 0.0])  # y-axis
+    # v3 = np.array([0.0, 0.0, 1.0])  # z-axis
     
-    print(proj.b_by_extictions('1 0 -1 0', '1 0 -1 1', '1 0 -1 2', '2 -1 -1 -2', abs_tol=5))
+    # # Define angles with respect to v3
+    # theta1 = np.pi/4  # 45° between u and v3 in plane (v1, v3) = (x, z) plane
+    # theta2 = np.pi/3  # 60° between u and v3 in plane (v2, v3) = (y, z) plane
+    
+    # print(f"θ₁ = {theta1:.4f} rad ({np.degrees(theta1):.1f}°) - angle with v3 in (v1,v3) plane")
+    # print(f"θ₂ = {theta2:.4f} rad ({np.degrees(theta2):.1f}°) - angle with v3 in (v2,v3) plane")
+    
+    # # Solve
+    # u, coeffs = find_vector_from_angles_v3_reference(v1, v2, v3, theta1, theta2, metric)
+    
+    # if u is not None:
+    #     verify_solution(u, v1, v2, v3, theta1, theta2, metric, coeffs)
+    
+    # print("\n" + "="*50)
+    
+    # Example 2: Non-Euclidean space
+    print("Example 2: Non-Euclidean space")
+    print("=" * 50)
+    
+    # Define a non-trivial metric tensor
+    from hexag_cristallo_tool_gamma import Wurtzite
+    c = Wurtzite(a=3.2494, c=5.2054)
+    metric = c.G
+    # metric = np.array([[2.0, 0.5, 0.0],
+    #                    [0.5, 1.0, 0.3],
+    #                    [0.0, 0.3, 3.0]])
+    
+    # Define basis vectors
+    v1 = c.vector_4ind_to_3ind('1 0 -1 0')
+    v2 = c.vector_4ind_to_3ind('0 0 0 1')
+    v3 = c.vector_4ind_to_3ind('1 -2 1 0')
+    
+    print(f"v1 = {v1}")
+    print(f"v2 = {v2}")
+    print(f"v3 = {v3}")
+    
+    # Define angles with respect to v3
+    theta1 = np.radians(30)  # 30° with v3 in plane (v1, v3)
+    theta2 = np.radians(24.81795638)  # 45° with v3 in plane (v2, v3)
+    
+    print(f"θ₁ = {theta1:.4f} rad ({np.degrees(theta1):.1f}°) - angle with v3 in (v1,v3) plane")
+    print(f"θ₂ = {theta2:.4f} rad ({np.degrees(theta2):.1f}°) - angle with v3 in (v2,v3) plane")
+    
+    # Solve
+    u, coeffs = find_vector_from_angles_v3_reference(v1, v2, v3, theta1, theta2, metric)
+    
+    if u is not None:
+        verify_solution(u, v1, v2, v3, theta1, theta2, metric, coeffs)
+    
+    print("\n" + "="*50)
 
-    # print(f"Total number of combinations: {len(combinations)}")
-    # print(f"Unique angles: {sorted(list(angles))}")
+    print("Conversions:")
+    print(f"v1 = {c.vector_3ind_to_4ind(v1)}")
+    print(f"v2 = {c.vector_3ind_to_4ind(v2)}")
+    print(f"v3 = {c.vector_3ind_to_4ind(v3)}")
+    print(f"u = {c.vector_3ind_to_4ind(vector_equivalent(u))}")
+
+    print("\n" + "="*50)
+
+    print("2. u1 (e-beam) x line1 plane")
+    b = c.vector_4ind_to_3ind('1 -1 0 4')  # dislo line direction
+    n = cross_product_metric(u, b, metric)
+    print(f"u = {u}")
+    print(f"b = {b}")
+    print(f"n = {n} = {c.vector_3ind_to_4ind(vector_equivalent(n))}")
+    print(f"u·n = {u @ metric @ n:.2e}")
+    print(f"b·n = {b @ metric @ n:.2e}")
+
+    print("3. u2 (e-beam) x line2 plane")
+
+    print("4. Line direction")
     
+    # Example 3: Test with specific geometry
+    # print("Example 3: More complex basis vectors")
+    # print("=" * 50)
+    
+    # # Define metric tensor (identity)
+    # metric = np.eye(3)
+    
+    # # Define non-orthogonal basis vectors
+    # v1 = np.array([1.0, 1.0, 0.0]) / np.sqrt(2)  # normalized
+    # v2 = np.array([0.0, 1.0, 1.0]) / np.sqrt(2)  # normalized
+    # v3 = np.array([1.0, 0.0, 1.0]) / np.sqrt(2)  # normalized
+    
+    # print(f"v1 = {v1}")
+    # print(f"v2 = {v2}")
+    # print(f"v3 = {v3}")
+    
+    # # Define angles with respect to v3
+    # theta1 = np.pi/3  # 60° with v3 in plane (v1, v3)
+    # theta2 = np.pi/4  # 45° with v3 in plane (v2, v3)
+    
+    # print(f"θ₁ = {theta1:.4f} rad ({np.degrees(theta1):.1f}°) - angle with v3 in (v1,v3) plane")
+    # print(f"θ₂ = {theta2:.4f} rad ({np.degrees(theta2):.1f}°) - angle with v3 in (v2,v3) plane")
+    
+    # # Solve
+    # u, coeffs = find_vector_from_angles_v3_reference(v1, v2, v3, theta1, theta2, metric)
+    
+    # if u is not None:
+    #     verify_solution(u, v1, v2, v3, theta1, theta2, metric, coeffs)
