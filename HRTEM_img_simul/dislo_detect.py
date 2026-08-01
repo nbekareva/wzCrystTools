@@ -32,8 +32,7 @@ matplotlib.use("Agg")           # headless-safe
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from scipy.ndimage import gaussian_filter, label, center_of_mass, rotate as ndimage_rotate
-from scipy.signal import find_peaks
-from skimage.restoration import unwrap_phase
+from _hrtem_helpers import load_dm3, power_spectrum, auto_detect_g_vectors, manual_pick_g_vectors, gpa_phase, bragg_filtered_image
 
 # ── optional: ncempy (preferred) or hyperspy as fallback ──────────────────────
 try:
@@ -48,280 +47,6 @@ except ImportError:
             "ERROR: Install ncempy  →  pip install ncempy\n"
             "       or hyperspy    →  pip install hyperspy"
         )
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  I/O helpers
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def load_dm3(path: str):
-    """Return (image_2d_float32, pixel_size_nm, unit_string)."""
-    path = str(path)
-    if _READER == "ncempy":
-        with dm_reader.fileDM(path) as f:
-            d = f.getDataset(0)
-        img = d["data"].astype(np.float32)
-        # calibration lives in d["pixelSize"] / d["pixelUnit"]
-        cal = d.get("pixelSize", [1.0, 1.0])
-        unit = d.get("pixelUnit", ["px", "px"])
-        pixel_size = float(cal[-1]) if hasattr(cal, "__len__") else float(cal)
-        unit_str = unit[-1] if hasattr(unit, "__len__") else str(unit)
-    else:                          # hyperspy fallback
-        s = hs.load(path)
-        img = s.data.astype(np.float32)
-        ax = s.axes_manager.signal_axes[-1]
-        pixel_size = ax.scale
-        unit_str = ax.units
-
-    # Collapse to 2-D if a stack was loaded
-    while img.ndim > 2:
-        img = img[0]
-
-    return img, pixel_size, unit_str
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  FFT / power-spectrum helpers
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def _hann2d(shape):
-    wy = np.hanning(shape[0])
-    wx = np.hanning(shape[1])
-    return np.outer(wy, wx)
-
-
-def power_spectrum(img):
-    """Return (log-scaled power, raw FFT shift) with Hann windowing."""
-    w = img * _hann2d(img.shape)
-    F = np.fft.fftshift(np.fft.fft2(w))
-    PS = np.abs(F) ** 2
-    return np.log1p(PS), F
-
-
-def freq_axes(shape, pixel_size):
-    """Frequency axes in 1/unit for a centred FFT."""
-    fy = np.fft.fftshift(np.fft.fftfreq(shape[0], d=pixel_size))
-    fx = np.fft.fftshift(np.fft.fftfreq(shape[1], d=pixel_size))
-    return fy, fx
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  Lattice-vector detection
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def _radial_profile(PS):
-    cy, cx = np.array(PS.shape) // 2
-    Y, X = np.indices(PS.shape)
-    R = np.hypot(Y - cy, X - cx).astype(int)
-    radial = np.bincount(R.ravel(), PS.ravel()) / np.bincount(R.ravel())
-    return radial
-
-
-def auto_detect_g_vectors(PS, n_peaks=2, min_dist_frac=0.04, max_dist_frac=0.45):
-    """
-    Detect the two dominant lattice g-vectors from the power spectrum.
-
-    Returns list of (row, col) pixel coordinates (in the shifted FFT).
-    """
-    H, W = PS.shape
-    cy, cx = H // 2, W // 2
-
-    # Suppress DC and very-low frequencies
-    mask_dc = np.zeros_like(PS)
-    rmin = int(min_dist_frac * min(H, W))
-    rmax = int(max_dist_frac * min(H, W))
-    Y, X = np.indices(PS.shape)
-    R = np.hypot(Y - cy, X - cx)
-    annulus = (R > rmin) & (R < rmax)
-
-    PS_masked = PS * annulus
-
-    # Find peaks in upper half-plane only (avoid Friedel pairs)
-    PS_half = PS_masked.copy()
-    PS_half[cy:] = 0          # keep top half
-    PS_flat = PS_half.ravel()
-
-    found = []
-    suppression_r = int(0.04 * min(H, W))
-
-    for _ in range(n_peaks * 4):           # gather more than needed, then filter
-        idx = int(np.argmax(PS_flat))
-        r, c = divmod(idx, W)
-        if PS_flat[idx] <= 0:
-            break
-        found.append((r, c))
-        # suppress neighbourhood
-        rr, cc = np.ogrid[max(0, r - suppression_r):min(H, r + suppression_r),
-                          max(0, c - suppression_r):min(W, c + suppression_r)]
-        PS_flat = PS_half.ravel()
-        PS_half[rr, cc] = 0
-        PS_flat = PS_half.ravel()
-        if len(found) >= n_peaks:
-            break
-
-    if len(found) < 2:
-        raise RuntimeError(
-            "Could not auto-detect 2 g-vectors. "
-            "Try --manual-g or increase --mask-radius."
-        )
-
-    # Return the two strongest, expressed as vectors from centre
-    g_pixels = [(r - cy, c - cx) for r, c in found[:2]]
-    return found[:2], g_pixels
-
-
-def manual_pick_g_vectors(PS, pixel_size):
-    """
-    Interactive g-vector picker with full zoom/pan support.
-
-    Zoom and pan freely with the toolbar; clicks are only registered when
-    the toolbar is in pointer mode (no active tool).  Right-click or closing
-    the window finishes early if 2 points have been picked.
-    """
-    log_PS = np.log1p(PS)
-    fig, ax = plt.subplots(figsize=(8, 8))
-    ax.imshow(log_PS, cmap="inferno", origin="upper")
-    ax.set_title(
-        "Zoom/pan freely, then click 2 diffraction spots (g₁, g₂)\n"
-        "— NOT the central DC spot —  right-click or close when done",
-        fontsize=9
-    )
-
-    picked   = []          # list of (x_data, y_data) in FFT-pixel coords
-    markers  = []          # scatter artists for visual feedback
-    colours  = ["cyan", "lime"]
-    labels   = ["g₁", "g₂"]
-
-    def _on_click(event):
-        # Ignore if a toolbar mode is active (zoom / pan)
-        if fig.canvas.toolbar.mode != "":
-            return
-        # Only left-clicks inside the axes
-        if event.inaxes is not ax or event.button != 1:
-            return
-        if len(picked) >= 2:
-            return
-
-        x, y = event.xdata, event.ydata
-        picked.append((x, y))
-        idx = len(picked) - 1
-
-        # Draw a circle + label at the chosen spot
-        circ = patches.Circle((x, y), radius=6, linewidth=1.5,
-                               edgecolor=colours[idx], facecolor="none",
-                               transform=ax.transData, zorder=5)
-        ax.add_patch(circ)
-        ax.text(x + 8, y, labels[idx], color=colours[idx],
-                fontsize=10, zorder=5)
-        fig.canvas.draw_idle()
-
-        if len(picked) == 2:
-            ax.set_title("Both g-vectors selected — close the window to continue",
-                         fontsize=9, color="lime")
-            fig.canvas.draw_idle()
-
-    cid = fig.canvas.mpl_connect("button_press_event", _on_click)
-    plt.tight_layout()
-    plt.show()                    # blocks until the window is closed
-    fig.canvas.mpl_disconnect(cid)
-
-    if len(picked) < 2:
-        raise RuntimeError(
-            f"Need 2 g-vector picks, got {len(picked)}. "
-            "Re-run and click exactly 2 diffraction spots."
-        )
-
-    cy, cx = np.array(PS.shape) // 2
-    peak_px = [(int(round(y)), int(round(x))) for x, y in picked]
-    g_pixels = [(r - cy, c - cx) for r, c in peak_px]
-    return peak_px, g_pixels
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  Geometric Phase Analysis
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def gpa_phase(F_shifted, peak_rc, mask_radius):
-    """
-    Band-pass filter the FFT around `peak_rc` (row, col in shifted array),
-    shift to origin, IFFT → complex field, extract & unwrap phase.
-
-    Returns unwrapped phase array (radians), same shape as image.
-    """
-    H, W = F_shifted.shape
-    r0, c0 = peak_rc
-
-    # Build circular mask centred on the g-spot
-    Y, X = np.indices((H, W))
-    dist = np.hypot(Y - r0, X - c0)
-    band_mask = dist < mask_radius
-
-    F_filtered = np.zeros_like(F_shifted)
-    F_filtered[band_mask] = F_shifted[band_mask]
-
-    # Shift g → DC so we get the slowly-varying phase modulation
-    dy, dx = H // 2 - r0, W // 2 - c0
-    F_shifted_to_dc = np.roll(np.roll(F_filtered, dy, axis=0), dx, axis=1)
-
-    # Back to real space
-    psi = np.fft.ifft2(np.fft.ifftshift(F_shifted_to_dc))
-
-    # Wrapped phase
-    phi_wrapped = np.angle(psi)
-
-    # Unwrap
-    phi = unwrap_phase(phi_wrapped)
-    return phi
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  Bragg-filtered image
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def bragg_filtered_image(F_shifted, peak_rc, mask_radius):
-    """
-    Reconstruct a Bragg-filtered (lattice-fringe) image for the g-vector at
-    `peak_rc` by including BOTH the g and its Friedel pair (-g).
-
-    Including -g ensures the result is real-valued, so fringes are directly
-    visible as intensity modulations — terminating fringes mark dislocation
-    cores.  A soft (cosine) edge on the circular mask suppresses Fourier
-    ringing that would otherwise obscure the defects.
-
-    Returns a real-valued 2D array normalised to [0, 1].
-    """
-    H, W = F_shifted.shape
-    cy, cx = H // 2, W // 2
-    r0, c0 = peak_rc
-
-    # Friedel (conjugate) partner
-    r1, c1 = 2 * cy - r0, 2 * cx - c0
-
-    Y, X = np.indices((H, W))
-
-    def soft_mask(rc, rr, cc):
-        """Cosine-tapered circular aperture centred on (rc[0], rc[1])."""
-        d = np.hypot(Y - rc[0], X - rc[1])
-        m = np.zeros((H, W))
-        inner = mask_radius * 0.75
-        m[d <= inner] = 1.0
-        taper = (d > inner) & (d < mask_radius)
-        m[taper] = 0.5 * (1 + np.cos(np.pi * (d[taper] - inner) /
-                                      (mask_radius - inner)))
-        return m
-
-    mask = soft_mask((r0, c0), r0, c0) + soft_mask((r1, c1), r1, c1)
-    mask = np.clip(mask, 0, 1)
-
-    F_bragg = F_shifted * mask
-
-    # IFFT → real part (imaginary is numerical noise)
-    bragg = np.real(np.fft.ifft2(np.fft.ifftshift(F_bragg)))
-
-    # Normalise to [0, 1] for display
-    bragg -= bragg.min()
-    bragg /= bragg.max() + 1e-12
-    return bragg
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -379,58 +104,89 @@ def save_results(img, PS, log_ps, bragg1, bragg2, curl, cores,
     H, W = img.shape
     extent_img = [0, W * pixel_size, H * pixel_size, 0]   # physical coords
 
-    fig, axes = plt.subplots(2, 3, figsize=(16, 10))
+    # ── Layout ────────────────────────────────────────────────────────────────
+    # Each cell in the mosaic is one equal "tile".
+    # "hrtem" spans a 2×2 block  → 4× the area of one tile  (HRTEM large)
+    # "ps" and "curl" each occupy 1×1                        (4× smaller)
+    # "b1" / "b2"  each occupy 1×1  (unchanged relative size)
+    # "cores" spans the full bottom row (4 tiles wide)
+    layout = [
+        ["hrtem", "hrtem", "ps",   "curl"],
+        ["hrtem", "hrtem", "b1",   "b2"  ],
+        ["cores", "cores", "cores","cores"],
+    ]
+    fig, axd = plt.subplot_mosaic(
+        layout,
+        figsize=(18, 14),
+        gridspec_kw={"hspace": 0.38, "wspace": 0.30},
+    )
     fig.suptitle(f"HRTEM Dislocation Analysis — {out_stem}", fontsize=13)
 
-    # 1. Raw image
-    ax = axes[0, 0]
-    ax.imshow(img, cmap="gray", vmin=np.percentile(img, 3), vmax=np.percentile(img, 97), origin="upper", extent=extent_img)
-    ax.set_title("HRTEM image")
-    ax.set_xlabel(f"x [{unit_str}]"); ax.set_ylabel(f"y [{unit_str}]")
+    # ── 1. Raw HRTEM image (large) ────────────────────────────────────────────
+    ax = axd["hrtem"]
+    ax.imshow(img, cmap="gray",
+              vmin=np.percentile(img, 3), vmax=np.percentile(img, 97),
+              origin="upper", extent=extent_img)
+    ax.set_title("HRTEM image", fontsize=11)
+    ax.set_xlabel(f"x [{unit_str}]")
+    ax.set_ylabel(f"y [{unit_str}]")
 
-    # 2. Power spectrum with g-vector markers
-    ax = axes[0, 1]
+    # ── 2. Power spectrum (small) ─────────────────────────────────────────────
+    ax = axd["ps"]
     ax.imshow(log_ps, cmap="inferno", origin="upper")
     colours = ["cyan", "lime"]
-    labels = ["g₁", "g₂"]
+    labels  = ["g₁", "g₂"]
     for (r, c), col, lbl in zip(peak_px, colours, labels):
         circ = patches.Circle((c, r), radius=6, linewidth=1.5,
                                edgecolor=col, facecolor="none")
         ax.add_patch(circ)
-        ax.text(c + 8, r, lbl, color=col, fontsize=9)
-    ax.set_title("Power spectrum (log)")
+        ax.text(c + 8, r, lbl, color=col, fontsize=8)
+    ax.set_title("Power spectrum\n(log)", fontsize=9)
     ax.axis("off")
 
-    # 3. Bragg-filtered image for g₁
-    # Terminating fringes = dislocation cores visible directly in the image
-    ax = axes[0, 2]
-    ax.imshow(bragg1, cmap="gray", vmin=np.percentile(bragg1, 3), vmax=np.percentile(bragg1, 97), origin="upper", extent=extent_img)
-    ax.set_title("Bragg-filtered image (g₁)\n[lattice fringes — terminations = dislocations]")
-    ax.set_xlabel(f"x [{unit_str}]")
+    # ── 3. Bragg-filtered image g₁ (small) ───────────────────────────────────
+    ax = axd["b1"]
+    ax.imshow(bragg1, cmap="gray",
+              vmin=np.percentile(bragg1, 3), vmax=np.percentile(bragg1, 97),
+              origin="upper", extent=extent_img)
+    ax.set_title("Bragg filter (g₁)\n[fringe terminations = dislocations]",
+                 fontsize=8)
+    ax.set_xlabel(f"x [{unit_str}]", fontsize=8)
+    ax.tick_params(labelsize=7)
 
-    # 4. Bragg-filtered image for g₂
-    ax = axes[1, 0]
-    ax.imshow(bragg2, cmap="gray", vmin=np.percentile(bragg2, 3), vmax=np.percentile(bragg2, 97), origin="upper", extent=extent_img)
-    ax.set_title("Bragg-filtered image (g₂)\n[lattice fringes — terminations = dislocations]")
-    ax.set_xlabel(f"x [{unit_str}]"); ax.set_ylabel(f"y [{unit_str}]")
+    # ── 4. Bragg-filtered image g₂ (small) ───────────────────────────────────
+    ax = axd["b2"]
+    ax.imshow(bragg2, cmap="gray",
+              vmin=np.percentile(bragg2, 3), vmax=np.percentile(bragg2, 97),
+              origin="upper", extent=extent_img)
+    ax.set_title("Bragg filter (g₂)\n[fringe terminations = dislocations]",
+                 fontsize=8)
+    ax.set_xlabel(f"x [{unit_str}]", fontsize=8)
+    ax.tick_params(labelsize=7)
 
-    # 5. Curl (dislocation density)
-    ax = axes[1, 1]
-    vmax = np.percentile(np.abs(curl), 99)
+    # ── 5. Curl / dislocation density (small) ────────────────────────────────
+    ax = axd["curl"]
+    vmax_c = np.percentile(np.abs(curl), 99)
     im = ax.imshow(curl, cmap="seismic", origin="upper",
-                   vmin=-vmax, vmax=vmax, extent=extent_img)
-    plt.colorbar(im, ax=ax, fraction=0.04, label=f"curl [{unit_str}⁻¹]")
-    ax.set_title("Curl of displacement field")
-    ax.set_xlabel(f"x [{unit_str}]")
+                   vmin=-vmax_c, vmax=vmax_c, extent=extent_img)
+    plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04,
+                 label=f"curl [{unit_str}⁻¹]")
+    ax.set_title("Curl of\ndisp. field", fontsize=9)
+    ax.set_xlabel(f"x [{unit_str}]", fontsize=8)
+    ax.tick_params(labelsize=7)
 
-    # 6. Annotated image with detected cores
-    ax = axes[1, 2]
-    ax.imshow(img, cmap="gray", vmin=np.percentile(img, 3), vmax=np.percentile(img, 97), origin="upper", extent=extent_img)
+    # ── 6. Annotated image with detected cores (full-width bottom strip) ──────
+    ax = axd["cores"]
+    ax.imshow(img, cmap="gray",
+              vmin=np.percentile(img, 3), vmax=np.percentile(img, 97),
+              origin="upper", extent=extent_img)
     for (r, c) in cores:
         ax.plot(c * pixel_size, r * pixel_size,
                 marker="o", ms=20, mew=1, mfc="none", color="red")
-    ax.set_title(f"Detected cores (n={len(cores)})")
+    ax.set_title(f"Detected dislocation cores  (n = {len(cores)})",
+                 fontsize=11)
     ax.set_xlabel(f"x [{unit_str}]")
+    ax.set_ylabel(f"y [{unit_str}]")
 
     plt.tight_layout()
     fig_path = out_stem + "_analysis.png"
@@ -438,12 +194,13 @@ def save_results(img, PS, log_ps, bragg1, bragg2, curl, cores,
     plt.close(fig)
     print(f"  Figure saved → {fig_path}")
 
-    # CSV
+    # ── CSV ───────────────────────────────────────────────────────────────────
     csv_path = out_stem + "_cores.csv"
     with open(csv_path, "w") as f:
         f.write(f"core_id,row_px,col_px,x_{unit_str},y_{unit_str}\n")
         for i, (r, c) in enumerate(cores):
-            f.write(f"{i+1},{r:.2f},{c:.2f},{c*pixel_size:.4f},{r*pixel_size:.4f}\n")
+            f.write(f"{i+1},{r:.2f},{c:.2f},"
+                    f"{c*pixel_size:.4f},{r*pixel_size:.4f}\n")
     print(f"  Core positions → {csv_path} ({len(cores)} dislocations found)")
 
     return fig_path, csv_path
@@ -694,8 +451,8 @@ def main():
     phi2 = gpa_phase(F_shifted, peak_px[1], args.mask_radius)
 
     # Bragg-filtered lattice-fringe images (g + Friedel pair, soft aperture)
-    bragg1 = bragg_filtered_image(F_shifted, peak_px[0], args.mask_radius)
-    bragg2 = bragg_filtered_image(F_shifted, peak_px[1], args.mask_radius)
+    bragg1 = bragg_filtered_image(F_shifted, peak_px[0], args.mask_radius, mask_type="gaussian")
+    bragg2 = bragg_filtered_image(F_shifted, peak_px[1], args.mask_radius, mask_type="gaussian")
 
     # Displacement fields along each g
     ux = displacement_field(phi1, g_pixels[0], pixel_size)

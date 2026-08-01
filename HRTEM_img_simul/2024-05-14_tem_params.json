@@ -1,0 +1,11 @@
+{
+    "aberration_coefficients": {
+        "C3_Cs": -8.0e-6,
+        "C5": 6.8e-3
+    },
+    "microscope_params": {
+        "acceleration_voltage_eV": 300e3,
+        "energy_spread_eV": 0.7,
+        "Cc": 1.7e-3
+    }
+}
